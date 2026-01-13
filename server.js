@@ -1,5 +1,3 @@
-//npx nodemon server.js
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -15,7 +13,6 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 app.get('/api/produtos', async (req, res) => {
     const { data, error } = await supabase.from('produtos').select('*').order('descricao');
     if (error) return res.status(500).json({ error: error.message });
-    // Formata para camelCase
     const formatado = data.map(p => ({
         id: p.id, codigo: p.codigo, descricao: p.descricao, marca: p.marca,
         qtdeAtual: p.qtde_atual, precoCusto: p.preco_custo, precoVenda: p.preco_venda
@@ -149,7 +146,6 @@ app.post('/api/os/:id/itens', async (req, res) => {
     }]).select();
 
     // Atualizar total da OS
-    // (Recalcula o total somando tudo que tem lá)
     const { data: itens } = await supabase.from('itens_os').select('subtotal').eq('os_id', osId);
     const novoTotal = itens.reduce((acc, item) => acc + item.subtotal, 0);
     await supabase.from('ordens_servico').update({ total: novoTotal }).eq('id', osId);
@@ -169,7 +165,15 @@ app.put('/api/os/:id/finalizar', async (req, res) => {
     res.json(data);
 });
 
+// --- CONFIGURAÇÃO DO SERVIDOR (COMPATÍVEL COM VERCEL) ---
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-    console.log(`🚀 Backend completo rodando na porta ${PORT}`);
-});
+
+// Só inicia o servidor se não estiver sendo importado (modo local)
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`🚀 Backend completo rodando na porta ${PORT}`);
+    });
+}
+
+// Exporta o app para o Vercel conseguir usar (modo serverless)
+module.exports = app;
