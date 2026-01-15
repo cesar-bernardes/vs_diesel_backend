@@ -177,3 +177,4 @@ if (require.main === module) {
 
 // Exporta o app para o Vercel conseguir usar (modo serverless)
 module.exports = app;
+//npx nodemon server.js
