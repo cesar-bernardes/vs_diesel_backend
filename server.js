@@ -210,6 +210,58 @@ app.put('/api/os/:id/finalizar', async (req, res) => {
     if (error) return res.status(500).json({ error: error.message });
     res.json(data);
 });
+// NOVA ROTA: REMOVER ITEM DA OS (E DEVOLVER AO ESTOQUE)
+app.delete('/api/os/itens/:id', async (req, res) => {
+    const { id } = req.params;
+
+    // 1. Buscar o item para saber qual produto e quantidade estornar
+    const { data: item, error: findError } = await supabase
+        .from('itens_os')
+        .select('*')
+        .eq('id', id)
+        .single();
+    
+    if (findError) return res.status(500).json({ error: findError.message });
+
+    // 2. Se for PEÇA, devolver a quantidade ao estoque (Estorno)
+    if (item.tipo === 'PECA' && item.produto_id) {
+        const { data: prod } = await supabase
+            .from('produtos')
+            .select('qtde_atual')
+            .eq('id', item.produto_id)
+            .single();
+            
+        if (prod) {
+             await supabase
+                .from('produtos')
+                .update({ qtde_atual: prod.qtde_atual + item.quantidade })
+                .eq('id', item.produto_id);
+        }
+    }
+
+    // 3. Deletar o item da tabela
+    const { error: deleteError } = await supabase
+        .from('itens_os')
+        .delete()
+        .eq('id', id);
+        
+    if (deleteError) return res.status(500).json({ error: deleteError.message });
+
+    // 4. Recalcular o valor total da OS e atualizar
+    const { data: itens } = await supabase
+        .from('itens_os')
+        .select('subtotal')
+        .eq('os_id', item.os_id);
+        
+    const novoTotal = itens ? itens.reduce((acc, i) => acc + i.subtotal, 0) : 0;
+    
+    await supabase
+        .from('ordens_servico')
+        .update({ total: novoTotal })
+        .eq('id', item.os_id);
+
+    res.json({ message: 'Item removido e estoque estornado com sucesso!' });
+});
 
 // --- CONFIGURAÇÃO DO SERVIDOR (COMPATÍVEL COM VERCEL) ---
 const PORT = process.env.PORT || 8080;
