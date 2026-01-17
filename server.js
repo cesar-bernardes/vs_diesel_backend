@@ -9,7 +9,11 @@ app.use(cors());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// --- ROTAS DE ESTOQUE ---
+// ==================================================================
+// --- ROTAS DE ESTOQUE (PRODUTOS) ---
+// ==================================================================
+
+// Listar Produtos
 app.get('/api/produtos', async (req, res) => {
     const { data, error } = await supabase.from('produtos').select('*').order('descricao');
     if (error) return res.status(500).json({ error: error.message });
@@ -20,6 +24,7 @@ app.get('/api/produtos', async (req, res) => {
     res.json(formatado);
 });
 
+// Criar Produto Novo
 app.post('/api/produtos', async (req, res) => {
     const { codigo, descricao, marca, qtde, precoCusto, unidade } = req.body;
     const { data, error } = await supabase.from('produtos').insert([{
@@ -30,6 +35,7 @@ app.post('/api/produtos', async (req, res) => {
     res.json(data);
 });
 
+// Atualizar Produto (Entrada de Estoque / Edição)
 app.put('/api/produtos/:id', async (req, res) => {
     const { id } = req.params;
     const { qtdeAtual, precoCusto, descricao, marca } = req.body;
@@ -49,34 +55,33 @@ app.put('/api/produtos/:id', async (req, res) => {
     res.json(data);
 });
 
-// NOVA ROTA: EXCLUIR PRODUTO (DELETE) COM VERIFICAÇÃO DE USO
+// Excluir Produto (Com preservação de histórico em OS antigas)
 app.delete('/api/produtos/:id', async (req, res) => {
     const { id } = req.params;
 
-    // 1. Verificar se o produto está em uso em alguma OS (Tabela itens_os)
-    // Usamos { count: 'exact', head: true } para ser mais rápido, só conta as linhas
-    const { count, error: checkError } = await supabase
+    // 1. DESVINCULAR o produto das Ordens de Serviço existentes.
+    // Mantém o registro visual na OS (nome/preço), mas libera o produto para exclusão.
+    const { error: updateError } = await supabase
         .from('itens_os')
-        .select('*', { count: 'exact', head: true })
+        .update({ produto_id: null }) 
         .eq('produto_id', id);
 
-    if (checkError) return res.status(500).json({ error: checkError.message });
-
-    // Se count > 0, significa que o produto está em alguma OS
-    if (count > 0) {
-        return res.status(400).json({ 
-            error: 'Bloqueado: Este produto faz parte do histórico de Ordens de Serviço e não pode ser excluído.' 
-        });
+    if (updateError) {
+        return res.status(500).json({ error: 'Erro ao desvincular histórico: ' + updateError.message });
     }
 
-    // 2. Se não estiver em uso, excluir
+    // 2. Excluir o produto definitivamente
     const { error } = await supabase.from('produtos').delete().eq('id', id);
+    
     if (error) return res.status(500).json({ error: error.message });
     
-    res.json({ message: 'Produto excluído com sucesso' });
+    res.json({ message: 'Produto excluído e histórico preservado.' });
 });
 
+
+// ==================================================================
 // --- ROTAS DE DESPESAS ---
+// ==================================================================
 app.get('/api/despesas', async (req, res) => {
     const { data, error } = await supabase.from('despesas').select('*').order('data_despesa', { ascending: false });
     if (error) return res.status(500).json({ error: error.message });
@@ -93,7 +98,10 @@ app.post('/api/despesas', async (req, res) => {
     res.json(data);
 });
 
+
+// ==================================================================
 // --- ROTAS DE FATURAMENTO E CLIENTES ---
+// ==================================================================
 app.get('/api/clientes', async (req, res) => {
     const { data, error } = await supabase.from('clientes_empresas').select('*').order('nome_razao_social');
     if (error) return res.status(500).json({ error: error.message });
@@ -144,7 +152,10 @@ app.put('/api/faturamentos/:id/pagar', async (req, res) => {
     res.json(data);
 });
 
-// --- ROTAS NOVAS: ORDENS DE SERVIÇO (OS) ---
+
+// ==================================================================
+// --- ROTAS DE ORDENS DE SERVIÇO (OS) ---
+// ==================================================================
 
 // Listar OS
 app.get('/api/os', async (req, res) => {
@@ -177,7 +188,7 @@ app.post('/api/os/:id/itens', async (req, res) => {
     const { osId, produtoId, descricao, tipo, quantidade, preco } = req.body;
     const subtotal = parseFloat(quantidade) * parseFloat(preco);
 
-    // Se for PEÇA, verificar e baixar estoque
+    // Se for PEÇA, verificar e BAIXAR do estoque
     if (tipo === 'PECA' && produtoId) {
         const { data: prod } = await supabase.from('produtos').select('qtde_atual').eq('id', produtoId).single();
         if (prod) {
@@ -200,17 +211,7 @@ app.post('/api/os/:id/itens', async (req, res) => {
     res.json(data);
 });
 
-// Finalizar OS
-app.put('/api/os/:id/finalizar', async (req, res) => {
-    const { id } = req.params;
-    const { data, error } = await supabase
-        .from('ordens_servico')
-        .update({ status: 'FINALIZADA', data_fechamento: new Date() })
-        .eq('id', id).select();
-    if (error) return res.status(500).json({ error: error.message });
-    res.json(data);
-});
-// NOVA ROTA: REMOVER ITEM DA OS (E DEVOLVER AO ESTOQUE)
+// Remover Item da OS (E estornar estoque se for peça)
 app.delete('/api/os/itens/:id', async (req, res) => {
     const { id } = req.params;
 
@@ -263,16 +264,25 @@ app.delete('/api/os/itens/:id', async (req, res) => {
     res.json({ message: 'Item removido e estoque estornado com sucesso!' });
 });
 
-// --- CONFIGURAÇÃO DO SERVIDOR (COMPATÍVEL COM VERCEL) ---
+// Finalizar OS
+app.put('/api/os/:id/finalizar', async (req, res) => {
+    const { id } = req.params;
+    const { data, error } = await supabase
+        .from('ordens_servico')
+        .update({ status: 'FINALIZADA', data_fechamento: new Date() })
+        .eq('id', id).select();
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data);
+});
+
+// --- CONFIGURAÇÃO DO SERVIDOR ---
 const PORT = process.env.PORT || 8080;
 
-// Só inicia o servidor se não estiver sendo importado (modo local)
 if (require.main === module) {
     app.listen(PORT, () => {
         console.log(`🚀 Backend completo rodando na porta ${PORT}`);
     });
 }
 
-// Exporta o app para o Vercel conseguir usar (modo serverless)
 module.exports = app;
 //npx nodemon server.js
