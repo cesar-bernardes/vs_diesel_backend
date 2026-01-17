@@ -49,11 +49,30 @@ app.put('/api/produtos/:id', async (req, res) => {
     res.json(data);
 });
 
-// NOVA ROTA: EXCLUIR PRODUTO (DELETE)
+// NOVA ROTA: EXCLUIR PRODUTO (DELETE) COM VERIFICAÇÃO DE USO
 app.delete('/api/produtos/:id', async (req, res) => {
     const { id } = req.params;
+
+    // 1. Verificar se o produto está em uso em alguma OS (Tabela itens_os)
+    // Usamos { count: 'exact', head: true } para ser mais rápido, só conta as linhas
+    const { count, error: checkError } = await supabase
+        .from('itens_os')
+        .select('*', { count: 'exact', head: true })
+        .eq('produto_id', id);
+
+    if (checkError) return res.status(500).json({ error: checkError.message });
+
+    // Se count > 0, significa que o produto está em alguma OS
+    if (count > 0) {
+        return res.status(400).json({ 
+            error: 'Bloqueado: Este produto faz parte do histórico de Ordens de Serviço e não pode ser excluído.' 
+        });
+    }
+
+    // 2. Se não estiver em uso, excluir
     const { error } = await supabase.from('produtos').delete().eq('id', id);
     if (error) return res.status(500).json({ error: error.message });
+    
     res.json({ message: 'Produto excluído com sucesso' });
 });
 
@@ -195,11 +214,13 @@ app.put('/api/os/:id/finalizar', async (req, res) => {
 // --- CONFIGURAÇÃO DO SERVIDOR (COMPATÍVEL COM VERCEL) ---
 const PORT = process.env.PORT || 8080;
 
+// Só inicia o servidor se não estiver sendo importado (modo local)
 if (require.main === module) {
     app.listen(PORT, () => {
         console.log(`🚀 Backend completo rodando na porta ${PORT}`);
     });
 }
 
+// Exporta o app para o Vercel conseguir usar (modo serverless)
 module.exports = app;
 //npx nodemon server.js
