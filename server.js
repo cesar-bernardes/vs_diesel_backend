@@ -30,6 +30,26 @@ app.post('/api/produtos', async (req, res) => {
     res.json(data);
 });
 
+// NOVA ROTA: ATUALIZAR PRODUTO (PUT)
+app.put('/api/produtos/:id', async (req, res) => {
+    const { id } = req.params;
+    const { qtdeAtual, precoCusto, descricao, marca } = req.body;
+
+    const { data, error } = await supabase
+        .from('produtos')
+        .update({ 
+            qtde_atual: parseInt(qtdeAtual), 
+            preco_custo: parseFloat(precoCusto),
+            descricao: descricao,
+            marca: marca
+        })
+        .eq('id', id)
+        .select();
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data);
+});
+
 // --- ROTAS DE DESPESAS ---
 app.get('/api/despesas', async (req, res) => {
     const { data, error } = await supabase.from('despesas').select('*').order('data_despesa', { ascending: false });
