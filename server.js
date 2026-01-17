@@ -30,7 +30,6 @@ app.post('/api/produtos', async (req, res) => {
     res.json(data);
 });
 
-// NOVA ROTA: ATUALIZAR PRODUTO (PUT)
 app.put('/api/produtos/:id', async (req, res) => {
     const { id } = req.params;
     const { qtdeAtual, precoCusto, descricao, marca } = req.body;
@@ -48,6 +47,14 @@ app.put('/api/produtos/:id', async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
     res.json(data);
+});
+
+// NOVA ROTA: EXCLUIR PRODUTO (DELETE)
+app.delete('/api/produtos/:id', async (req, res) => {
+    const { id } = req.params;
+    const { error } = await supabase.from('produtos').delete().eq('id', id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ message: 'Produto excluído com sucesso' });
 });
 
 // --- ROTAS DE DESPESAS ---
@@ -188,13 +195,11 @@ app.put('/api/os/:id/finalizar', async (req, res) => {
 // --- CONFIGURAÇÃO DO SERVIDOR (COMPATÍVEL COM VERCEL) ---
 const PORT = process.env.PORT || 8080;
 
-// Só inicia o servidor se não estiver sendo importado (modo local)
 if (require.main === module) {
     app.listen(PORT, () => {
         console.log(`🚀 Backend completo rodando na porta ${PORT}`);
     });
 }
 
-// Exporta o app para o Vercel conseguir usar (modo serverless)
 module.exports = app;
 //npx nodemon server.js
