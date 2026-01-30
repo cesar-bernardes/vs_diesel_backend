@@ -393,6 +393,12 @@ app.post('/api/despesas', denyCargo(['FUNCIONARIO']), async (req, res) => {
     }]).select();
     if (error) return res.status(500).json({ error: error.message });
     res.json(data);
+    app.delete('/api/despesas/:id', async (req, res) => {
+    const { id } = req.params;
+    const { error } = await supabase.from('despesas').delete().eq('id', id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ message: 'Despesa excluída com sucesso!' });
+});
 });
 
 
