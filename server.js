@@ -137,6 +137,134 @@ app.get('/api/estoque/historico', denyCargo(['FUNCIONARIO']), async (req, res) =
     res.json(data);
 });
 
+app.get('/api/estoque/dashboard', denyCargo(['FUNCIONARIO']), async (req, res) => {
+    const mes = req.query && req.query.mes ? String(req.query.mes) : new Date().toISOString().slice(0, 7);
+    const rangeAtual = getUTCMonthRange(mes);
+    if (!rangeAtual) return res.status(400).json({ error: 'Mês inválido' });
+
+    const [anoStr, mesStr] = mes.split('-');
+    const anoNum = parseInt(anoStr);
+    const mesNum = parseInt(mesStr);
+    if (!Number.isFinite(anoNum) || !Number.isFinite(mesNum)) return res.status(400).json({ error: 'Mês inválido' });
+
+    const prevDate = new Date(Date.UTC(anoNum, mesNum - 2, 1, 0, 0, 0));
+    const mesAnterior = `${prevDate.getUTCFullYear()}-${String(prevDate.getUTCMonth() + 1).padStart(2, '0')}`;
+    const rangeAnterior = getUTCMonthRange(mesAnterior);
+    if (!rangeAnterior) return res.status(400).json({ error: 'Mês inválido' });
+
+    function somarValor(movs) {
+        return (movs || []).reduce((acc, item) => acc + (Number(item.quantidade || 0) * Number(item.preco_custo || 0)), 0);
+    }
+
+    function agruparPorTipo(movs) {
+        return (movs || []).reduce((acc, item) => {
+            const tipo = String(item.tipo || '').toUpperCase();
+            const valor = Number(item.quantidade || 0) * Number(item.preco_custo || 0);
+            acc[tipo] = (acc[tipo] || 0) + valor;
+            return acc;
+        }, {});
+    }
+
+    function variacao(atual, anterior) {
+        const variacaoAbs = Number(atual || 0) - Number(anterior || 0);
+        const variacaoPct = Number(anterior || 0) === 0 ? null : variacaoAbs / Number(anterior);
+        return { variacaoAbs, variacaoPct };
+    }
+
+    const [
+        entradasAtualRes,
+        saidasAtualRes,
+        entradasAnteriorRes,
+        saidasAnteriorRes,
+        produtosRes
+    ] = await Promise.all([
+        supabase
+            .from('historico_estoque')
+            .select('tipo, quantidade, preco_custo')
+            .like('tipo', 'ENTRADA%')
+            .gte('data_movimentacao', rangeAtual.dataInicio)
+            .lt('data_movimentacao', rangeAtual.dataFim),
+        supabase
+            .from('historico_estoque')
+            .select('tipo, quantidade, preco_custo')
+            .like('tipo', 'SAIDA%')
+            .gte('data_movimentacao', rangeAtual.dataInicio)
+            .lt('data_movimentacao', rangeAtual.dataFim),
+        supabase
+            .from('historico_estoque')
+            .select('tipo, quantidade, preco_custo')
+            .like('tipo', 'ENTRADA%')
+            .gte('data_movimentacao', rangeAnterior.dataInicio)
+            .lt('data_movimentacao', rangeAnterior.dataFim),
+        supabase
+            .from('historico_estoque')
+            .select('tipo, quantidade, preco_custo')
+            .like('tipo', 'SAIDA%')
+            .gte('data_movimentacao', rangeAnterior.dataInicio)
+            .lt('data_movimentacao', rangeAnterior.dataFim),
+        supabase
+            .from('produtos')
+            .select('qtde_atual, preco_custo')
+    ]);
+
+    if (entradasAtualRes.error) return res.status(500).json({ error: entradasAtualRes.error.message });
+    if (saidasAtualRes.error) return res.status(500).json({ error: saidasAtualRes.error.message });
+    if (entradasAnteriorRes.error) return res.status(500).json({ error: entradasAnteriorRes.error.message });
+    if (saidasAnteriorRes.error) return res.status(500).json({ error: saidasAnteriorRes.error.message });
+    if (produtosRes.error) return res.status(500).json({ error: produtosRes.error.message });
+
+    const entradasAtual = entradasAtualRes.data || [];
+    const saidasAtual = saidasAtualRes.data || [];
+    const entradasAnterior = entradasAnteriorRes.data || [];
+    const saidasAnterior = saidasAnteriorRes.data || [];
+
+    const compradoAtual = entradasAtual
+        .filter(m => String(m.tipo || '').toUpperCase() === 'ENTRADA')
+        .reduce((acc, item) => acc + (Number(item.quantidade || 0) * Number(item.preco_custo || 0)), 0);
+    const compradoAnterior = entradasAnterior
+        .filter(m => String(m.tipo || '').toUpperCase() === 'ENTRADA')
+        .reduce((acc, item) => acc + (Number(item.quantidade || 0) * Number(item.preco_custo || 0)), 0);
+
+    const entrouTotalAtual = somarValor(entradasAtual);
+    const entrouTotalAnterior = somarValor(entradasAnterior);
+    const saiuTotalAtual = somarValor(saidasAtual);
+    const saiuTotalAnterior = somarValor(saidasAnterior);
+    const saldoPeriodoAtual = entrouTotalAtual - saiuTotalAtual;
+    const saldoPeriodoAnterior = entrouTotalAnterior - saiuTotalAnterior;
+
+    const valorEstoqueAtual = (produtosRes.data || []).reduce((acc, p) => {
+        return acc + (Number(p.qtde_atual || 0) * Number(p.preco_custo || 0));
+    }, 0);
+    const valorEstoqueInicioMes = valorEstoqueAtual - saldoPeriodoAtual;
+    const estoqueDesdeInicio = variacao(valorEstoqueAtual, valorEstoqueInicioMes);
+
+    return res.json({
+        mes,
+        mesAnterior,
+        comprado: {
+            atual: compradoAtual,
+            anterior: compradoAnterior,
+            ...variacao(compradoAtual, compradoAnterior)
+        },
+        saiu: {
+            atual: saiuTotalAtual,
+            anterior: saiuTotalAnterior,
+            porTipoAtual: agruparPorTipo(saidasAtual),
+            ...variacao(saiuTotalAtual, saiuTotalAnterior)
+        },
+        saldoPeriodo: {
+            atual: saldoPeriodoAtual,
+            anterior: saldoPeriodoAnterior,
+            ...variacao(saldoPeriodoAtual, saldoPeriodoAnterior)
+        },
+        estoque: {
+            atual: valorEstoqueAtual,
+            inicioMes: valorEstoqueInicioMes,
+            ...estoqueDesdeInicio
+        }
+    });
+});
+
 app.get('/api/dashboard/resumo', denyCargo(['FUNCIONARIO']), async (req, res) => {
     const range = getUTCMonthRange(req.query && req.query.mes);
     if (!range) return res.status(400).json({ error: 'Mês inválido' });
@@ -579,10 +707,31 @@ app.post('/api/os/:id/itens', async (req, res) => {
             }
         }
 
-        await supabase
+        const novoEstoque = estoqueAtual - quantidadeNum;
+        const { error: updateEstoqueError } = await supabase
             .from('produtos')
-            .update({ qtde_atual: estoqueAtual - quantidadeNum })
+            .update({ qtde_atual: novoEstoque })
             .eq('id', produtoId);
+
+        if (updateEstoqueError) {
+            return res.status(500).json({ error: updateEstoqueError.message });
+        }
+
+        const { error: historicoError } = await supabase.from('historico_estoque').insert([{
+            produto_id: produtoId,
+            tipo: 'SAIDA_OS',
+            quantidade: quantidadeNum,
+            preco_custo: Number.isFinite(precoCusto) ? precoCusto : 0
+        }]);
+
+        if (historicoError) {
+            await supabase
+                .from('produtos')
+                .update({ qtde_atual: estoqueAtual })
+                .eq('id', produtoId);
+
+            return res.status(500).json({ error: historicoError.message });
+        }
     }
 
     if (tipo === 'SERVICO') {
@@ -627,9 +776,40 @@ app.delete('/api/os/itens/:id', denyCargo(['FUNCIONARIO']), async (req, res) => 
 
     // 2. Se for PEÇA, DEVOLVE ao estoque
     if (item.tipo === 'PECA' && item.produto_id) {
-        const { data: prod } = await supabase.from('produtos').select('qtde_atual').eq('id', item.produto_id).single();
+        const { data: prod, error: prodError } = await supabase
+            .from('produtos')
+            .select('qtde_atual, preco_custo')
+            .eq('id', item.produto_id)
+            .single();
+
+        if (prodError) return res.status(500).json({ error: prodError.message });
         if (prod) {
-             await supabase.from('produtos').update({ qtde_atual: prod.qtde_atual + item.quantidade }).eq('id', item.produto_id);
+            const qtdeAtual = Number(prod.qtde_atual) || 0;
+            const entrada = Number(item.quantidade) || 0;
+            const custo = Number(prod.preco_custo) || 0;
+
+            const { error: updateError } = await supabase
+                .from('produtos')
+                .update({ qtde_atual: qtdeAtual + entrada })
+                .eq('id', item.produto_id);
+
+            if (updateError) return res.status(500).json({ error: updateError.message });
+
+            const { error: historicoError } = await supabase.from('historico_estoque').insert([{
+                produto_id: item.produto_id,
+                tipo: 'ENTRADA_ESTORNO_OS',
+                quantidade: entrada,
+                preco_custo: custo
+            }]);
+
+            if (historicoError) {
+                await supabase
+                    .from('produtos')
+                    .update({ qtde_atual: qtdeAtual })
+                    .eq('id', item.produto_id);
+
+                return res.status(500).json({ error: historicoError.message });
+            }
         }
     }
 
