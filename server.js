@@ -137,6 +137,134 @@ app.get('/api/estoque/historico', denyCargo(['FUNCIONARIO']), async (req, res) =
     res.json(data);
 });
 
+app.get('/api/estoque/dashboard', denyCargo(['FUNCIONARIO']), async (req, res) => {
+    const mes = req.query && req.query.mes ? String(req.query.mes) : new Date().toISOString().slice(0, 7);
+    const rangeAtual = getUTCMonthRange(mes);
+    if (!rangeAtual) return res.status(400).json({ error: 'Mês inválido' });
+
+    const [anoStr, mesStr] = mes.split('-');
+    const anoNum = parseInt(anoStr);
+    const mesNum = parseInt(mesStr);
+    if (!Number.isFinite(anoNum) || !Number.isFinite(mesNum)) return res.status(400).json({ error: 'Mês inválido' });
+
+    const prevDate = new Date(Date.UTC(anoNum, mesNum - 2, 1, 0, 0, 0));
+    const mesAnterior = `${prevDate.getUTCFullYear()}-${String(prevDate.getUTCMonth() + 1).padStart(2, '0')}`;
+    const rangeAnterior = getUTCMonthRange(mesAnterior);
+    if (!rangeAnterior) return res.status(400).json({ error: 'Mês inválido' });
+
+    function somarValor(movs) {
+        return (movs || []).reduce((acc, item) => acc + (Number(item.quantidade || 0) * Number(item.preco_custo || 0)), 0);
+    }
+
+    function agruparPorTipo(movs) {
+        return (movs || []).reduce((acc, item) => {
+            const tipo = String(item.tipo || '').toUpperCase();
+            const valor = Number(item.quantidade || 0) * Number(item.preco_custo || 0);
+            acc[tipo] = (acc[tipo] || 0) + valor;
+            return acc;
+        }, {});
+    }
+
+    function variacao(atual, anterior) {
+        const variacaoAbs = Number(atual || 0) - Number(anterior || 0);
+        const variacaoPct = Number(anterior || 0) === 0 ? null : variacaoAbs / Number(anterior);
+        return { variacaoAbs, variacaoPct };
+    }
+
+    const [
+        entradasAtualRes,
+        saidasAtualRes,
+        entradasAnteriorRes,
+        saidasAnteriorRes,
+        produtosRes
+    ] = await Promise.all([
+        supabase
+            .from('historico_estoque')
+            .select('tipo, quantidade, preco_custo')
+            .like('tipo', 'ENTRADA%')
+            .gte('data_movimentacao', rangeAtual.dataInicio)
+            .lt('data_movimentacao', rangeAtual.dataFim),
+        supabase
+            .from('historico_estoque')
+            .select('tipo, quantidade, preco_custo')
+            .like('tipo', 'SAIDA%')
+            .gte('data_movimentacao', rangeAtual.dataInicio)
+            .lt('data_movimentacao', rangeAtual.dataFim),
+        supabase
+            .from('historico_estoque')
+            .select('tipo, quantidade, preco_custo')
+            .like('tipo', 'ENTRADA%')
+            .gte('data_movimentacao', rangeAnterior.dataInicio)
+            .lt('data_movimentacao', rangeAnterior.dataFim),
+        supabase
+            .from('historico_estoque')
+            .select('tipo, quantidade, preco_custo')
+            .like('tipo', 'SAIDA%')
+            .gte('data_movimentacao', rangeAnterior.dataInicio)
+            .lt('data_movimentacao', rangeAnterior.dataFim),
+        supabase
+            .from('produtos')
+            .select('qtde_atual, preco_custo')
+    ]);
+
+    if (entradasAtualRes.error) return res.status(500).json({ error: entradasAtualRes.error.message });
+    if (saidasAtualRes.error) return res.status(500).json({ error: saidasAtualRes.error.message });
+    if (entradasAnteriorRes.error) return res.status(500).json({ error: entradasAnteriorRes.error.message });
+    if (saidasAnteriorRes.error) return res.status(500).json({ error: saidasAnteriorRes.error.message });
+    if (produtosRes.error) return res.status(500).json({ error: produtosRes.error.message });
+
+    const entradasAtual = entradasAtualRes.data || [];
+    const saidasAtual = saidasAtualRes.data || [];
+    const entradasAnterior = entradasAnteriorRes.data || [];
+    const saidasAnterior = saidasAnteriorRes.data || [];
+
+    const compradoAtual = entradasAtual
+        .filter(m => String(m.tipo || '').toUpperCase() === 'ENTRADA')
+        .reduce((acc, item) => acc + (Number(item.quantidade || 0) * Number(item.preco_custo || 0)), 0);
+    const compradoAnterior = entradasAnterior
+        .filter(m => String(m.tipo || '').toUpperCase() === 'ENTRADA')
+        .reduce((acc, item) => acc + (Number(item.quantidade || 0) * Number(item.preco_custo || 0)), 0);
+
+    const entrouTotalAtual = somarValor(entradasAtual);
+    const entrouTotalAnterior = somarValor(entradasAnterior);
+    const saiuTotalAtual = somarValor(saidasAtual);
+    const saiuTotalAnterior = somarValor(saidasAnterior);
+    const saldoPeriodoAtual = entrouTotalAtual - saiuTotalAtual;
+    const saldoPeriodoAnterior = entrouTotalAnterior - saiuTotalAnterior;
+
+    const valorEstoqueAtual = (produtosRes.data || []).reduce((acc, p) => {
+        return acc + (Number(p.qtde_atual || 0) * Number(p.preco_custo || 0));
+    }, 0);
+    const valorEstoqueInicioMes = valorEstoqueAtual - saldoPeriodoAtual;
+    const estoqueDesdeInicio = variacao(valorEstoqueAtual, valorEstoqueInicioMes);
+
+    return res.json({
+        mes,
+        mesAnterior,
+        comprado: {
+            atual: compradoAtual,
+            anterior: compradoAnterior,
+            ...variacao(compradoAtual, compradoAnterior)
+        },
+        saiu: {
+            atual: saiuTotalAtual,
+            anterior: saiuTotalAnterior,
+            porTipoAtual: agruparPorTipo(saidasAtual),
+            ...variacao(saiuTotalAtual, saiuTotalAnterior)
+        },
+        saldoPeriodo: {
+            atual: saldoPeriodoAtual,
+            anterior: saldoPeriodoAnterior,
+            ...variacao(saldoPeriodoAtual, saldoPeriodoAnterior)
+        },
+        estoque: {
+            atual: valorEstoqueAtual,
+            inicioMes: valorEstoqueInicioMes,
+            ...estoqueDesdeInicio
+        }
+    });
+});
+
 app.get('/api/dashboard/resumo', denyCargo(['FUNCIONARIO']), async (req, res) => {
     const range = getUTCMonthRange(req.query && req.query.mes);
     if (!range) return res.status(400).json({ error: 'Mês inválido' });
@@ -159,6 +287,10 @@ app.get('/api/dashboard/resumo', denyCargo(['FUNCIONARIO']), async (req, res) =>
         despesasMesRes,
         comprasRes,
         osAbertasRes,
+        osAbertasTotalRes,
+        osFechadasTotalRes,
+        osAbertasMesRes,
+        osFechadasMesRes,
         receberHojeRes,
         receberVencidoRes,
         receberProx7Res,
@@ -168,6 +300,10 @@ app.get('/api/dashboard/resumo', denyCargo(['FUNCIONARIO']), async (req, res) =>
         supabase.from('despesas').select('valor').gte('data_despesa', dataInicio).lt('data_despesa', dataFim),
         supabase.from('historico_estoque').select('quantidade, preco_custo').eq('tipo', 'ENTRADA').gte('data_movimentacao', dataInicio).lt('data_movimentacao', dataFim),
         supabase.from('ordens_servico').select('id').eq('status', 'ABERTA'),
+        supabase.from('ordens_servico').select('total').eq('status', 'ABERTA'),
+        supabase.from('ordens_servico').select('total').eq('status', 'FINALIZADA'),
+        supabase.from('ordens_servico').select('total').eq('status', 'ABERTA').gte('data_abertura', dataInicio).lt('data_abertura', dataFim),
+        supabase.from('ordens_servico').select('total').eq('status', 'FINALIZADA').gte('data_fechamento', dataInicio).lt('data_fechamento', dataFim),
         supabase.from('faturamentos').select('valor_parcela').eq('status', 'PENDENTE').gte('data_vencimento', inicioHoje).lt('data_vencimento', fimHoje),
         supabase.from('faturamentos').select('valor_parcela').neq('status', 'PAGO').lt('data_vencimento', inicioHoje),
         supabase.from('faturamentos').select('valor_parcela').neq('status', 'PAGO').gte('data_vencimento', inicioHoje).lt('data_vencimento', fimSeteDias),
@@ -178,6 +314,10 @@ app.get('/api/dashboard/resumo', denyCargo(['FUNCIONARIO']), async (req, res) =>
     const despesasMes = despesasMesRes.data || [];
     const comprasMes = comprasRes.data || [];
     const osAbertas = osAbertasRes.data || [];
+    const osAbertasTotal = osAbertasTotalRes.data || [];
+    const osFechadasTotal = osFechadasTotalRes.data || [];
+    const osAbertasMes = osAbertasMesRes.data || [];
+    const osFechadasMes = osFechadasMesRes.data || [];
     const receberHoje = receberHojeRes.data || [];
     const receberVencido = receberVencidoRes.data || [];
     const receberProx7 = receberProx7Res.data || [];
@@ -187,6 +327,10 @@ app.get('/api/dashboard/resumo', denyCargo(['FUNCIONARIO']), async (req, res) =>
     if (despesasMesRes.error) return res.status(500).json({ error: despesasMesRes.error.message });
     if (comprasRes.error) return res.status(500).json({ error: comprasRes.error.message });
     if (osAbertasRes.error) return res.status(500).json({ error: osAbertasRes.error.message });
+    if (osAbertasTotalRes.error) return res.status(500).json({ error: osAbertasTotalRes.error.message });
+    if (osFechadasTotalRes.error) return res.status(500).json({ error: osFechadasTotalRes.error.message });
+    if (osAbertasMesRes.error) return res.status(500).json({ error: osAbertasMesRes.error.message });
+    if (osFechadasMesRes.error) return res.status(500).json({ error: osFechadasMesRes.error.message });
     if (receberHojeRes.error) return res.status(500).json({ error: receberHojeRes.error.message });
     if (receberVencidoRes.error) return res.status(500).json({ error: receberVencidoRes.error.message });
     if (receberProx7Res.error) return res.status(500).json({ error: receberProx7Res.error.message });
@@ -202,6 +346,14 @@ app.get('/api/dashboard/resumo', denyCargo(['FUNCIONARIO']), async (req, res) =>
     const aReceberVencido = receberVencido.reduce((acc, f) => acc + Number(f.valor_parcela || 0), 0);
     const aVencerProximos7Dias = receberProx7.reduce((acc, f) => acc + Number(f.valor_parcela || 0), 0);
 
+    const osAbertasTotalValor = osAbertasTotal.reduce((acc, os) => acc + Number(os.total || 0), 0);
+    const osFechadasTotalValor = osFechadasTotal.reduce((acc, os) => acc + Number(os.total || 0), 0);
+
+    const osAbertasMesQtd = osAbertasMes.length;
+    const osFechadasMesQtd = osFechadasMes.length;
+    const osAbertasMesValor = osAbertasMes.reduce((acc, os) => acc + Number(os.total || 0), 0);
+    const osFechadasMesValor = osFechadasMes.reduce((acc, os) => acc + Number(os.total || 0), 0);
+
     return res.json({
         mes: req.query && req.query.mes ? String(req.query.mes) : new Date().toISOString().slice(0, 7),
         recebidoMes,
@@ -210,6 +362,12 @@ app.get('/api/dashboard/resumo', denyCargo(['FUNCIONARIO']), async (req, res) =>
         comprasEstoqueMes,
         lucroReal,
         osAbertas: osAbertas.length,
+        osAbertasTotalValor,
+        osFechadasTotalValor,
+        osAbertasMesQtd,
+        osFechadasMesQtd,
+        osAbertasMesValor,
+        osFechadasMesValor,
         aReceberHoje,
         aReceberVencido,
         aVencerProximos7Dias,
@@ -579,10 +737,31 @@ app.post('/api/os/:id/itens', async (req, res) => {
             }
         }
 
-        await supabase
+        const novoEstoque = estoqueAtual - quantidadeNum;
+        const { error: updateEstoqueError } = await supabase
             .from('produtos')
-            .update({ qtde_atual: estoqueAtual - quantidadeNum })
+            .update({ qtde_atual: novoEstoque })
             .eq('id', produtoId);
+
+        if (updateEstoqueError) {
+            return res.status(500).json({ error: updateEstoqueError.message });
+        }
+
+        const { error: historicoError } = await supabase.from('historico_estoque').insert([{
+            produto_id: produtoId,
+            tipo: 'SAIDA_OS',
+            quantidade: quantidadeNum,
+            preco_custo: Number.isFinite(precoCusto) ? precoCusto : 0
+        }]);
+
+        if (historicoError) {
+            await supabase
+                .from('produtos')
+                .update({ qtde_atual: estoqueAtual })
+                .eq('id', produtoId);
+
+            return res.status(500).json({ error: historicoError.message });
+        }
     }
 
     if (tipo === 'SERVICO') {
@@ -627,9 +806,40 @@ app.delete('/api/os/itens/:id', denyCargo(['FUNCIONARIO']), async (req, res) => 
 
     // 2. Se for PEÇA, DEVOLVE ao estoque
     if (item.tipo === 'PECA' && item.produto_id) {
-        const { data: prod } = await supabase.from('produtos').select('qtde_atual').eq('id', item.produto_id).single();
+        const { data: prod, error: prodError } = await supabase
+            .from('produtos')
+            .select('qtde_atual, preco_custo')
+            .eq('id', item.produto_id)
+            .single();
+
+        if (prodError) return res.status(500).json({ error: prodError.message });
         if (prod) {
-             await supabase.from('produtos').update({ qtde_atual: prod.qtde_atual + item.quantidade }).eq('id', item.produto_id);
+            const qtdeAtual = Number(prod.qtde_atual) || 0;
+            const entrada = Number(item.quantidade) || 0;
+            const custo = Number(prod.preco_custo) || 0;
+
+            const { error: updateError } = await supabase
+                .from('produtos')
+                .update({ qtde_atual: qtdeAtual + entrada })
+                .eq('id', item.produto_id);
+
+            if (updateError) return res.status(500).json({ error: updateError.message });
+
+            const { error: historicoError } = await supabase.from('historico_estoque').insert([{
+                produto_id: item.produto_id,
+                tipo: 'ENTRADA_ESTORNO_OS',
+                quantidade: entrada,
+                preco_custo: custo
+            }]);
+
+            if (historicoError) {
+                await supabase
+                    .from('produtos')
+                    .update({ qtde_atual: qtdeAtual })
+                    .eq('id', item.produto_id);
+
+                return res.status(500).json({ error: historicoError.message });
+            }
         }
     }
 
@@ -653,6 +863,73 @@ app.put('/api/os/:id/finalizar', denyCargo(['FUNCIONARIO']), async (req, res) =>
         .eq('id', id).select();
     if (error) return res.status(500).json({ error: error.message });
     res.json(data);
+});
+
+app.delete('/api/os/:id', denyCargo(['FUNCIONARIO']), async (req, res) => {
+    const osId = parseInt(req.params.id);
+    if (!Number.isFinite(osId) || osId <= 0) return res.status(400).json({ error: 'OS inválida' });
+
+    const { data: os, error: osError } = await supabase
+        .from('ordens_servico')
+        .select('id')
+        .eq('id', osId)
+        .single();
+
+    if (osError || !os) return res.status(404).json({ error: 'OS não encontrada' });
+
+    const { data: itens, error: itensError } = await supabase
+        .from('itens_os')
+        .select('id, tipo, quantidade, produto_id')
+        .eq('os_id', osId);
+
+    if (itensError) return res.status(500).json({ error: itensError.message });
+
+    for (const item of itens || []) {
+        if (String(item.tipo).toUpperCase() !== 'PECA' || !item.produto_id) continue;
+
+        const { data: prod, error: prodError } = await supabase
+            .from('produtos')
+            .select('qtde_atual, preco_custo')
+            .eq('id', item.produto_id)
+            .single();
+
+        if (prodError || !prod) return res.status(500).json({ error: 'Produto não encontrado para estorno' });
+
+        const qtdeAtual = Number(prod.qtde_atual) || 0;
+        const entrada = Number(item.quantidade) || 0;
+        const custo = Number(prod.preco_custo) || 0;
+
+        const { error: updateError } = await supabase
+            .from('produtos')
+            .update({ qtde_atual: qtdeAtual + entrada })
+            .eq('id', item.produto_id);
+
+        if (updateError) return res.status(500).json({ error: updateError.message });
+
+        const { error: historicoError } = await supabase.from('historico_estoque').insert([{
+            produto_id: item.produto_id,
+            tipo: 'ENTRADA_ESTORNO_OS',
+            quantidade: entrada,
+            preco_custo: custo
+        }]);
+
+        if (historicoError) {
+            await supabase
+                .from('produtos')
+                .update({ qtde_atual: qtdeAtual })
+                .eq('id', item.produto_id);
+
+            return res.status(500).json({ error: historicoError.message });
+        }
+    }
+
+    const { error: deleteItensError } = await supabase.from('itens_os').delete().eq('os_id', osId);
+    if (deleteItensError) return res.status(500).json({ error: deleteItensError.message });
+
+    const { error: deleteOSError } = await supabase.from('ordens_servico').delete().eq('id', osId);
+    if (deleteOSError) return res.status(500).json({ error: deleteOSError.message });
+
+    return res.json({ message: 'OS excluída com sucesso!' });
 });
 
 
